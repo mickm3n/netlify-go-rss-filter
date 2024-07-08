@@ -1,6 +1,6 @@
 module github.com/mickm3n/netlify-go-rss-filter
 
-go 1.22.5
+go 1.22
 
 require (
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
