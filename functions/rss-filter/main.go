@@ -1,13 +1,12 @@
 package main
 
 import (
-	//"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-
 	"github.com/mmcdole/gofeed"
 )
 
@@ -34,9 +33,33 @@ type Item struct {
 	PubDate     string `xml:"pubDate,omitempty"`
 }
 
-func parseAndFilterRSS(url, filterField, filterKeyword string) (*RSS, error) {
+type Filter struct {
+	Field string
+	Value string
+}
+
+type FilterFunc func(*gofeed.Item, string) bool
+
+var filterFunctions = map[string]FilterFunc{
+	"title": func(item *gofeed.Item, keyword string) bool {
+		return strings.Contains(strings.ToLower(item.Title), keyword)
+	},
+	"description": func(item *gofeed.Item, keyword string) bool {
+		return strings.Contains(strings.ToLower(item.Description), keyword)
+	},
+	"author": func(item *gofeed.Item, keyword string) bool {
+		return item.Author != nil && strings.Contains(strings.ToLower(item.Author.Name), keyword)
+	},
+	"content": func(item *gofeed.Item, keyword string) bool {
+		return strings.Contains(strings.ToLower(item.Title), keyword) ||
+			strings.Contains(strings.ToLower(item.Description), keyword) ||
+			(item.Author != nil && strings.Contains(strings.ToLower(item.Author.Name), keyword))
+	},
+}
+
+func parseAndFilterRSS(feedURL string, filters []Filter) (*RSS, error) {
 	fp := gofeed.NewParser()
-	feed, err := fp.ParseURL(url)
+	feed, err := fp.ParseURL(feedURL)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +74,7 @@ func parseAndFilterRSS(url, filterField, filterKeyword string) (*RSS, error) {
 	}
 
 	for _, item := range feed.Items {
-		if passesFilter(item, filterField, filterKeyword) {
+		if passesAllFilters(item, filters) {
 			rssItem := Item{
 				Title:       item.Title,
 				Link:        item.Link,
@@ -66,38 +89,43 @@ func parseAndFilterRSS(url, filterField, filterKeyword string) (*RSS, error) {
 	return rss, nil
 }
 
-func passesFilter(item *gofeed.Item, filterField, filterKeyword string) bool {
-	if filterKeyword == "" {
-		return true
+func passesAllFilters(item *gofeed.Item, filters []Filter) bool {
+	for _, filter := range filters {
+		if filterFunc, ok := filterFunctions[strings.ToLower(filter.Field)]; ok {
+			if !filterFunc(item, strings.ToLower(filter.Value)) {
+				return false
+			}
+		}
 	}
+	return true
+}
 
-	lowerKeyword := strings.ToLower(filterKeyword)
-	switch strings.ToLower(filterField) {
-	case "title":
-		return strings.Contains(strings.ToLower(item.Title), lowerKeyword)
-	case "description":
-		return strings.Contains(strings.ToLower(item.Description), lowerKeyword)
-	case "author":
-		return item.Author != nil && strings.Contains(strings.ToLower(item.Author.Name), lowerKeyword)
-	case "content":
-		return strings.Contains(strings.ToLower(item.Title), lowerKeyword) ||
-			strings.Contains(strings.ToLower(item.Description), lowerKeyword) ||
-			(item.Author != nil && strings.Contains(strings.ToLower(item.Author.Name), lowerKeyword))
-	default:
-		return true
+func parseFilters(queryParams map[string]string) ([]Filter, error) {
+	var filters []Filter
+	for field, value := range queryParams {
+		if field == "url" {
+			continue
+		}
+		if _, ok := filterFunctions[strings.ToLower(field)]; !ok {
+			return nil, fmt.Errorf("invalid filter field: %s", field)
+		}
+		filters = append(filters, Filter{Field: field, Value: value})
 	}
+	return filters, nil
 }
 
 func handler(request events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
-	url := request.QueryStringParameters["url"]
-	filterField := request.QueryStringParameters["field"]
-	filterKeyword := request.QueryStringParameters["filter"]
-
-	if url == "" {
+	feedURL := request.QueryStringParameters["url"]
+	if feedURL == "" {
 		return &events.APIGatewayProxyResponse{StatusCode: 400, Body: "Missing 'url' parameter"}, nil
 	}
 
-	rss, err := parseAndFilterRSS(url, filterField, filterKeyword)
+	filters, err := parseFilters(request.QueryStringParameters)
+	if err != nil {
+		return &events.APIGatewayProxyResponse{StatusCode: 400, Body: "Invalid query parameters"}, nil
+	}
+
+	rss, err := parseAndFilterRSS(feedURL, filters)
 	if err != nil {
 		return &events.APIGatewayProxyResponse{StatusCode: 500, Body: err.Error()}, nil
 	}
